@@ -1,18 +1,34 @@
-use std::process::exit;
+use std::{
+    fmt::{self, Display, Formatter},
+    process::exit,
+};
 
-#[derive(Debug)]
+struct TokenPath(usize, usize);
+
+impl Display for TokenPath {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.0, self.1)
+    }
+}
+
 enum Token {
-    Integer(i64),
-    Plus,
+    Integer(TokenPath, i64),
+    Plus(TokenPath),
 }
 
 struct Lexer<'a> {
     buffer: &'a [char],
+    line: usize,
+    column: usize,
 }
 
 impl<'a> Lexer<'a> {
     fn new(buffer: &'a [char]) -> Self {
-        Lexer { buffer }
+        Lexer {
+            buffer,
+            line: 1,
+            column: 1,
+        }
     }
 }
 
@@ -24,6 +40,11 @@ impl<'a> Iterator for Lexer<'a> {
 
         while !buffer.is_empty() && buffer[0].is_whitespace() {
             buffer = &buffer[1..];
+            self.column += 1;
+            if buffer[0] == '\n' {
+                self.line += 1;
+                self.column = 1;
+            }
         }
 
         if buffer.is_empty() {
@@ -31,6 +52,7 @@ impl<'a> Iterator for Lexer<'a> {
         }
 
         let c = buffer[0];
+        let token_path = TokenPath(self.line, self.column);
 
         match c {
             '0'..='9' => {
@@ -39,15 +61,20 @@ impl<'a> Iterator for Lexer<'a> {
                 while !buffer.is_empty() && buffer[0].is_digit(10) {
                     number.push(buffer[0]);
                     buffer = &buffer[1..];
+                    self.column += 1;
+                    if buffer[0] == '\n' {
+                        self.line += 1;
+                        self.column = 1;
+                    }
                 }
 
                 self.buffer = buffer;
 
-                Some(Token::Integer(number.parse::<i64>().unwrap()))
+                Some(Token::Integer(token_path, number.parse::<i64>().unwrap()))
             }
             '+' => {
                 self.buffer = &buffer[1..];
-                Some(Token::Plus)
+                Some(Token::Plus(token_path))
             }
             _ => None,
         }
@@ -55,7 +82,7 @@ impl<'a> Iterator for Lexer<'a> {
 }
 
 struct Compiler {
-    stack: Vec<Token>,
+    program: Vec<Token>,
 }
 
 impl Compiler {
@@ -65,12 +92,31 @@ impl Compiler {
 }
 
 struct Simulator {
-    stack: Vec<Token>,
+    program: Vec<Token>,
 }
 
 impl Simulator {
     fn run(&mut self) {
-        todo!()
+        let mut stack = Vec::new();
+
+        while let Some(token) = self.program.pop() {
+            match token {
+                Token::Integer(_, n) => {
+                    stack.push(n);
+                }
+                Token::Plus(path) => {
+                    let (a, b) = match (stack.pop(), stack.pop()) {
+                        (Some(a), Some(b)) => (a, b),
+                        _ => {
+                            println!("{}: stack underflow", path);
+                            exit(1);
+                        }
+                    };
+
+                    stack.push(a + b);
+                }
+            }
+        }
     }
 }
 
@@ -95,11 +141,11 @@ fn main() {
 
     match &args[1][..] {
         "com" => {
-            let mut compiler = Compiler { stack };
+            let mut compiler = Compiler { program: stack };
             compiler.compile();
         }
         "sim" => {
-            let mut simulator = Simulator { stack };
+            let mut simulator = Simulator { program: stack };
             simulator.run();
         }
         _ => {
