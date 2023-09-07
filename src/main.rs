@@ -4,6 +4,13 @@ use std::{
     process::exit,
 };
 
+// TODO: create assembly macro for writing
+macro_rules! twriteln {
+    ($writer:expr, $($arg:tt)*) => {
+        writeln!($writer, "\t{}", format!($($arg)*))
+    };
+}
+
 enum KroksMode {
     Compile,
     Simulate,
@@ -121,32 +128,32 @@ struct Compiler {
 
 impl Compiler {
     fn compile(&mut self, writer: &mut impl std::io::Write) {
-        writeln!(writer, ".segment text").unwrap();
+        writeln!(writer, "segment .text").unwrap();
         writeln!(writer, "global _start").unwrap();
         writeln!(writer, "_start:").unwrap();
 
         while let Some(token) = self.program.pop() {
             match token {
                 Token::Integer(_, n) => {
-                    writeln!(writer, "  ;; Push Integer").unwrap();
-                    writeln!(writer, "  mov rax, {}", n).unwrap();
-                    writeln!(writer, "  push rax").unwrap();
+                    twriteln!(writer, ";; Push Integer").unwrap();
+                    twriteln!(writer, "mov rax, {}", n).unwrap();
+                    twriteln!(writer, "push rax").unwrap();
                 }
                 Token::Print(_) => todo!(),
                 Token::Plus(_) => {
-                    writeln!(writer, "  ;; Plus").unwrap();
-                    writeln!(writer, "  pop rax").unwrap();
-                    writeln!(writer, "  pop rbx").unwrap();
-                    writeln!(writer, "  add rax, rbx").unwrap();
-                    writeln!(writer, "  push rax").unwrap();
+                    twriteln!(writer, ";; Plus").unwrap();
+                    twriteln!(writer, "pop rax").unwrap();
+                    twriteln!(writer, "pop rbx").unwrap();
+                    twriteln!(writer, "add rax, rbx").unwrap();
+                    twriteln!(writer, "push rax").unwrap();
                 }
             }
         }
 
-        writeln!(writer, "  ;; Exit").unwrap();
-        writeln!(writer, "  mov rax, 60").unwrap();
-        writeln!(writer, "  mov rdi, 0").unwrap();
-        writeln!(writer, "  syscall").unwrap();
+        twriteln!(writer, ";; Exit").unwrap();
+        twriteln!(writer, "mov rax, 60").unwrap();
+        twriteln!(writer, "mov rdi, 0").unwrap();
+        twriteln!(writer, "syscall").unwrap();
     }
 }
 
