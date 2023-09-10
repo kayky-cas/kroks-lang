@@ -16,8 +16,29 @@ enum KroksMode {
     Simulate,
 }
 
+enum KroksCompileError {
+    IO(std::io::Error),
+    UnexpectedEof,
+}
+
+impl Display for KroksCompileError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            KroksCompileError::UnexpectedEof => write!(f, "Unexpected end of file"),
+            KroksCompileError::IO(err) => write!(f, "IO error: {}", err),
+        }
+    }
+}
+
+impl From<std::io::Error> for KroksCompileError {
+    fn from(err: std::io::Error) -> Self {
+        KroksCompileError::IO(err)
+    }
+}
+
 enum KroksSimulateError {
     StackUnderflow(TokenPath),
+    UnexpectedEof,
 }
 
 #[derive(Debug)]
@@ -30,11 +51,25 @@ impl Display for TokenPath {
 }
 
 #[derive(Debug)]
-enum Token {
-    Integer(TokenPath, i64),
-    Plus(TokenPath),
+enum TokenKind {
+    Integer(i64),
+    Plus,
+    Minus,
     //  TODO: remove this token
-    Print(TokenPath),
+    Print64,
+    Invalid,
+}
+
+#[derive(Debug)]
+struct Token {
+    path: TokenPath,
+    kind: TokenKind,
+}
+
+impl Token {
+    fn new(kind: TokenKind, path: TokenPath) -> Self {
+        Token { path, kind }
+    }
 }
 
 struct Lexer<'a> {
@@ -83,41 +118,46 @@ impl<'a> Iterator for Lexer<'a> {
                     number.push(buffer[0]);
                     buffer = &buffer[1..];
                     self.column += 1;
-                    if buffer[0] == '\n' {
-                        self.line += 1;
-                        self.column = 1;
-                    }
                 }
 
                 self.buffer = buffer;
 
-                Some(Token::Integer(token_path, number.parse::<i64>().unwrap()))
+                Some(Token::new(
+                    TokenKind::Integer(number.parse::<i64>().unwrap()),
+                    token_path,
+                ))
             }
             'a'..='z' | 'A'..='Z' => {
                 let mut word = String::new();
 
-                while !buffer.is_empty() && buffer[0].is_alphabetic() {
+                while !buffer.is_empty() && buffer[0].is_alphanumeric() {
                     word.push(buffer[0]);
                     buffer = &buffer[1..];
                     self.column += 1;
-                    if buffer[0] == '\n' {
-                        self.line += 1;
-                        self.column = 1;
-                    }
                 }
 
                 self.buffer = buffer;
 
                 match word.as_str() {
-                    "print" => Some(Token::Print(token_path)),
-                    _ => None,
+                    "print64" => Some(Token::new(TokenKind::Print64, token_path)),
+                    _ => {
+                        self.buffer = &buffer[1..];
+                        Some(Token::new(TokenKind::Invalid, token_path))
+                    }
                 }
             }
             '+' => {
                 self.buffer = &buffer[1..];
-                Some(Token::Plus(token_path))
+                Some(Token::new(TokenKind::Plus, token_path))
             }
-            _ => None,
+            '-' => {
+                self.buffer = &buffer[1..];
+                Some(Token::new(TokenKind::Minus, token_path))
+            }
+            _ => {
+                self.buffer = &buffer[1..];
+                Some(Token::new(TokenKind::Invalid, token_path))
+            }
         }
     }
 }
@@ -127,40 +167,47 @@ struct Compiler {
 }
 
 impl Compiler {
-    fn compile(&mut self, writer: &mut impl std::io::Write) -> Result<(), std::io::Error> {
+    fn compile(&mut self, writer: &mut impl std::io::Write) -> Result<(), KroksCompileError> {
         writeln!(writer, "segment .text")?;
         writeln!(writer, "global _start")?;
         writeln!(writer, "_start:")?;
 
         while let Some(token) = self.program.pop() {
-            match token {
-                Token::Integer(_, n) => {
+            match token.kind {
+                TokenKind::Integer(n) => {
                     twriteln!(writer, ";; Push Integer")?;
                     twriteln!(writer, "mov rax, {}", n)?;
                     twriteln!(writer, "push rax")?;
                 }
-                Token::Plus(_) => {
+                TokenKind::Plus => {
                     twriteln!(writer, ";; Plus")?;
                     twriteln!(writer, "pop rax")?;
                     twriteln!(writer, "pop rbx")?;
                     twriteln!(writer, "add rax, rbx")?;
                     twriteln!(writer, "push rax")?;
                 }
-                Token::Print(_) => {
+                TokenKind::Minus => {
+                    twriteln!(writer, ";; Minus")?;
+                    twriteln!(writer, "pop rax")?;
+                    twriteln!(writer, "pop rbx")?;
+                    twriteln!(writer, "sub rax, rbx")?;
+                    twriteln!(writer, "push rax")?;
+                }
+                TokenKind::Print64 => {
                     twriteln!(writer, ";; Print")?;
                     twriteln!(writer, "pop rdi")?;
                     twriteln!(writer, "call print64")?;
                 }
+                TokenKind::Invalid => Err(KroksCompileError::UnexpectedEof)?,
             }
         }
-
-        // TODO: remove this when print is implemented
 
         twriteln!(writer, ";; Exit")?;
         twriteln!(writer, "mov rax, 60")?;
         twriteln!(writer, "mov rdi, 0")?;
         twriteln!(writer, "syscall")?;
 
+        // TODO: remove this when print is implemented
         writeln!(writer, "print64:")?;
         twriteln!(writer, "sub     rsp, 40")?;
         twriteln!(writer, "mov     BYTE [rsp+31], 10")?;
@@ -213,29 +260,35 @@ struct Simulator {
 
 impl Simulator {
     fn run(&mut self) -> Result<(), KroksSimulateError> {
-        dbg!(&self.program);
-
         let mut stack = Vec::new();
 
         while let Some(token) = self.program.pop() {
-            match token {
-                Token::Integer(_, n) => {
+            match token.kind {
+                TokenKind::Integer(n) => {
                     stack.push(n);
                 }
-                Token::Plus(path) => {
+                TokenKind::Plus => {
                     let (a, b) = match (stack.pop(), stack.pop()) {
                         (Some(a), Some(b)) => (a, b),
-                        _ => return Err(KroksSimulateError::StackUnderflow(path)),
+                        _ => return Err(KroksSimulateError::StackUnderflow(token.path)),
                     };
                     stack.push(a + b);
                 }
-                Token::Print(path) => {
+                TokenKind::Minus => {
+                    let (a, b) = match (stack.pop(), stack.pop()) {
+                        (Some(a), Some(b)) => (a, b),
+                        _ => return Err(KroksSimulateError::StackUnderflow(token.path)),
+                    };
+                    stack.push(a - b);
+                }
+                TokenKind::Print64 => {
                     let n = match stack.pop() {
                         Some(n) => n,
-                        None => return Err(KroksSimulateError::StackUnderflow(path)),
+                        None => return Err(KroksSimulateError::StackUnderflow(token.path)),
                     };
                     println!("{}", n);
                 }
+                TokenKind::Invalid => return Err(KroksSimulateError::UnexpectedEof),
             }
         }
 
@@ -271,12 +324,21 @@ fn main() {
     };
 
     let buffer = buffer.chars().collect::<Vec<char>>();
-
     let lexer = Lexer::new(&buffer);
 
-    let stack: Vec<Token> = lexer.into_iter().collect();
-    // TODO: remove this reverse
-    let stack = stack.into_iter().rev().collect::<Vec<Token>>();
+    let mut stack: Vec<Token> = Vec::new();
+
+    for token in lexer.into_iter() {
+        match token.kind {
+            TokenKind::Invalid => {
+                println!("Error: Invalid token at {}", token.path);
+                process::exit(1);
+            }
+            _ => stack.push(token),
+        }
+    }
+
+    stack.reverse();
 
     match &args[1][..] {
         "com" => {
@@ -289,29 +351,39 @@ fn main() {
             let mut output = std::fs::File::create(&asm_filename).unwrap();
             let mut output = BufWriter::new(&mut output);
 
-            match compiler.compile(&mut output) {
-                Ok(_) => {
-                    Command::new("nasm")
-                        .arg("-f")
-                        .arg("elf64")
-                        .arg("-ggdb")
-                        .arg("-o")
-                        .arg(&format!("{}.o", args[3]))
-                        .arg(&asm_filename)
-                        .output()
-                        .expect("failed to execute process");
+            if let Err(e) = compiler.compile(&mut output) {
+                match e {
+                    KroksCompileError::UnexpectedEof => {
+                        eprintln!("Error: Unexpected end of file");
+                    }
+                    KroksCompileError::IO(err) => {
+                        eprintln!("Error: {}", err);
+                    }
+                }
+                process::exit(1);
+            }
 
-                    Command::new("ld")
-                        .arg("-o")
-                        .arg(&args[3])
-                        .arg(&format!("{}.o", args[3]))
-                        .output()
-                        .expect("failed to execute process");
-                }
-                Err(err) => {
-                    println!("Error: {}", err);
-                    process::exit(1);
-                }
+            let mut nasm = Command::new("nasm");
+            nasm.arg("-felf64");
+            nasm.arg("-o");
+            nasm.arg(format!("{}.o", args[3]));
+            nasm.arg(asm_filename);
+            let nasm = nasm.output().unwrap();
+
+            if !nasm.status.success() {
+                println!("Error: {}", String::from_utf8_lossy(&nasm.stderr));
+                process::exit(1);
+            }
+
+            let mut ld = Command::new("ld");
+            ld.arg("-o");
+            ld.arg(&args[3]);
+            ld.arg(format!("{}.o", args[3]));
+            let ld = ld.output().unwrap();
+
+            if !ld.status.success() {
+                println!("Error: {}", String::from_utf8_lossy(&ld.stderr));
+                process::exit(1);
             }
         }
         "sim" => {
@@ -320,7 +392,10 @@ fn main() {
             if let Err(e) = simulator.run() {
                 match e {
                     KroksSimulateError::StackUnderflow(path) => {
-                        println!("Error: Stack underflow at {}", path);
+                        eprintln!("Error: Stack underflow at {}", path);
+                    }
+                    KroksSimulateError::UnexpectedEof => {
+                        eprintln!("Error: Unexpected end of file");
                     }
                 }
             }
